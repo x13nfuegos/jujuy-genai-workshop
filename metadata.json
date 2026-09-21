@@ -1,0 +1,6 @@
+{
+  "name": "Jujuy GenAI Workshop - Sorteador de Proyectos",
+  "description": "Generador y randomizador de proyectos e historias para talleres de IA Generativa en Jujuy, con dinámicas de grupo, temáticas locales y desafíos de prompt engineering.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
