@@ -13,9 +13,11 @@ import {
   Zap,
   Link2,
   ExternalLink,
+  Lock,
 } from 'lucide-react';
 import { GroupProject, ProjectLink } from '../types';
 import { sounds } from '../utils/audio';
+import { setPin as setStoredPin } from '../utils/groupPins';
 
 interface ProducerEditModalProps {
   group: GroupProject | null;
@@ -58,6 +60,8 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
   const [projectLinks, setProjectLinks] = useState<ProjectLink[]>([]);
   const [newLinkLabel, setNewLinkLabel] = useState('');
   const [newLinkUrl, setNewLinkUrl] = useState('');
+  // PIN con el que el equipo reserva su ficha (solo si todavia no tiene uno)
+  const [teamPin, setTeamPin] = useState('');
 
   useEffect(() => {
     if (group) {
@@ -68,6 +72,7 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
       setProjectLinks(group.projectLinks || []);
       setNewLinkLabel('');
       setNewLinkUrl('');
+      setTeamPin('');
       
       if (group.membersList && group.membersList.length > 0) {
         setMembers(group.membersList);
@@ -140,8 +145,27 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
 
   const cleanLinks = () => projectLinks.filter(l => l.label.trim() && l.url.trim());
 
+  /**
+   * Si el equipo eligio un PIN, lo dejamos guardado en ESTE dispositivo antes
+   * de subir. cloudSync lo manda a save_group, que lo hashea en la base.
+   */
+  const reservarConPin = () => {
+    const limpio = teamPin.trim();
+    if (limpio.length >= 4 && !group.hasPin) {
+      setStoredPin(group.id, limpio);
+    }
+  };
+
+  // Toma los integrantes ya agregados MAS el que quedo tipeado en el input
+  // sin haber clickeado "Agregar". Antes ese nombre se perdia en silencio.
+  const collectMembers = (): string[] => {
+    const pending = newMemberName.trim();
+    const all = pending ? [...members, pending] : members;
+    return all.map(m => m.trim()).filter(Boolean);
+  };
+
   const getCleanGroupData = (): GroupProject | null => {
-    const cleanMembers = members.map(m => m.trim()).filter(Boolean);
+    const cleanMembers = collectMembers();
     const trimmedCompany = productionCompany.trim();
 
     if (!trimmedCompany) {
@@ -168,7 +192,7 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
 
   const handleSaveOnly = () => {
     sounds.playClick();
-    const cleanMembers = members.map(m => m.trim()).filter(Boolean);
+    const cleanMembers = collectMembers();
     const updated: GroupProject = {
       ...group,
       groupName: groupName.trim() || group.groupName,
@@ -179,6 +203,8 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
       isRegistered: cleanMembers.length > 0 && productionCompany.trim().length > 0,
       projectLinks: cleanLinks(),
     };
+    setNewMemberName('');
+    reservarConPin();
     onSave(updated);
     onClose();
   };
@@ -191,6 +217,7 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
       return;
     }
     sounds.playClick();
+    reservarConPin();
     onSave(updated);
     onClose();
     if (onSaveAndLaunchMission) {
@@ -306,6 +333,35 @@ export const ProducerEditModal: React.FC<ProducerEditModalProps> = ({
             <p className="text-[10px] text-slate-500">
               Se incluirá en el certificado oficial de asignación de proyecto.
             </p>
+          </div>
+
+          {/* PIN del equipo: reserva la ficha para que otro grupo no la pise */}
+          <div className="space-y-1.5">
+            <label className="text-slate-300 font-semibold flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-amber-300" />
+              PIN del equipo {group.hasPin && <span className="text-lime-400">· ya configurado</span>}
+            </label>
+            {group.hasPin ? (
+              <p className="text-[10px] text-slate-500">
+                Esta ficha ya está reservada. Solo se puede editar desde un
+                dispositivo que conozca el PIN, o con el PIN maestro del taller.
+              </p>
+            ) : (
+              <>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  value={teamPin}
+                  onChange={e => setTeamPin(e.target.value)}
+                  placeholder="4 dígitos (opcional)"
+                  className="w-full bg-[#0c0e14] border border-[#1f2637] rounded-xl px-3.5 py-2 text-white text-xs focus:outline-none focus:border-amber-300 placeholder:text-slate-600"
+                />
+                <p className="text-[10px] text-slate-500">
+                  Opcional. Si lo cargás, ningún otro equipo va a poder editar
+                  esta ficha. Anotalo: no se puede recuperar.
+                </p>
+              </>
+            )}
           </div>
 
           {/* Integrantes del Equipo */}

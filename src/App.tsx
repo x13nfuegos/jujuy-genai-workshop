@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Header } from './components/Header';
 import { RouletteSpinner } from './components/RouletteSpinner';
 import { GroupGrid } from './components/GroupGrid';
@@ -10,6 +10,7 @@ import { ProducerEditModal } from './components/ProducerEditModal';
 import { StoryRoadmapModal } from './components/StoryRoadmapModal';
 import { GroupResetModal } from './components/GroupResetModal';
 import { IdeaGeneratorModal } from './components/IdeaGeneratorModal';
+import { PinPromptModal } from './components/PinPromptModal';
 import type { IdeaCombination } from './components/IdeaGeneratorModal';
 import { GroupProject, WorkshopConfig } from './types';
 import {
@@ -26,7 +27,18 @@ import {
   generateCertificateCode,
 } from './utils/generator';
 import { sounds } from './utils/audio';
-import { Sparkles, Check, Info } from 'lucide-react';
+import {
+  fetchGroups,
+  fetchConfig,
+  pushGroup,
+  pushAllGroups,
+  pushConfig,
+  subscribeToGroups,
+  isCloudEnabled,
+  type CloudStatus,
+} from './utils/cloudSync';
+import { setPin } from './utils/groupPins';
+import { Sparkles, Check, Info, Cloud, CloudOff, RefreshCw } from 'lucide-react';
 
 const STORAGE_GROUPS_KEY = 'jujuy_workshop_groups_v1';
 const STORAGE_CONFIG_KEY = 'jujuy_workshop_config_v1';
@@ -88,7 +100,20 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  // Sync to localStorage
+  // Estado de la sincronizacion con la nube (Supabase)
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus>(
+    isCloudEnabled ? 'conectando' : 'local'
+  );
+  // Ultima version que subimos de cada grupo, para no reenviar lo que no cambio
+  // ni rebotar los cambios que llegan por realtime.
+  const lastPushed = useRef<Map<string, string>>(new Map());
+  const hydrated = useRef(false);
+
+  // Grupo trabado esperando que alguien ingrese su PIN
+  const [pinPromptGroup, setPinPromptGroup] = useState<GroupProject | null>(null);
+  const [pinError, setPinError] = useState<string | null>(null);
+
+  // Sync to localStorage (cache instantaneo y respaldo offline)
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_GROUPS_KEY, JSON.stringify(groups));
@@ -100,6 +125,136 @@ export default function App() {
       localStorage.setItem(STORAGE_CONFIG_KEY, JSON.stringify(config));
     } catch {}
   }, [config]);
+
+  // --- Carga inicial desde la nube ---
+  useEffect(() => {
+    if (!isCloudEnabled) {
+      hydrated.current = true;
+      return;
+    }
+    let cancelado = false;
+
+    (async () => {
+      const [remotos, configRemota] = await Promise.all([fetchGroups(), fetchConfig()]);
+      if (cancelado) return;
+
+      if (remotos === null) {
+        setCloudStatus('error');
+        hydrated.current = true;
+        return;
+      }
+
+      if (remotos.length > 0) {
+        // La nube manda: es lo que vieron todos los dispositivos.
+        remotos.forEach(g => lastPushed.current.set(g.id, JSON.stringify(g)));
+        setGroups(remotos);
+        if (configRemota) setConfig(configRemota);
+      } else {
+        // Primera vez: sembramos la nube con lo que haya local.
+        const { trabados } = await pushAllGroups(groups);
+        groups
+          .filter(g => !trabados.some(t => t.id === g.id))
+          .forEach(g => lastPushed.current.set(g.id, JSON.stringify(g)));
+      }
+
+      setCloudStatus('sincronizado');
+      hydrated.current = true;
+    })();
+
+    return () => {
+      cancelado = true;
+    };
+    // Corre una sola vez al montar, a proposito.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // --- Subida de cambios locales ---
+  useEffect(() => {
+    if (!isCloudEnabled || !hydrated.current) return;
+
+    const cambiados = groups.filter(
+      g => lastPushed.current.get(g.id) !== JSON.stringify(g)
+    );
+    if (cambiados.length === 0) return;
+
+    const t = setTimeout(async () => {
+      const { result, trabados } = await pushAllGroups(cambiados);
+
+      const guardados = cambiados.filter(g => !trabados.some(t2 => t2.id === g.id));
+      guardados.forEach(g => lastPushed.current.set(g.id, JSON.stringify(g)));
+
+      if (result === 'pin') {
+        // Alguien intento editar un grupo que otro equipo reservo con PIN.
+        setPinError(null);
+        setPinPromptGroup(trabados[0]);
+        setCloudStatus('sincronizado');
+      } else {
+        setCloudStatus(result === 'ok' ? 'sincronizado' : 'error');
+      }
+    }, 400);
+
+    return () => clearTimeout(t);
+  }, [groups]);
+
+  // El equipo (o Gon con el PIN maestro) ingresa el PIN y reintentamos.
+  const handlePinSubmit = async (pin: string) => {
+    const grupo = pinPromptGroup;
+    if (!grupo) return;
+
+    const r = await pushGroup(grupo, pin);
+    if (r === 'ok') {
+      setPin(grupo.id, pin);
+      lastPushed.current.set(grupo.id, JSON.stringify(grupo));
+      setPinPromptGroup(null);
+      setPinError(null);
+      setCloudStatus('sincronizado');
+      showToast(`Grupo #${grupo.groupNumber} desbloqueado y guardado.`);
+    } else if (r === 'pin') {
+      setPinError('PIN incorrecto. Probá de nuevo o pedíselo al equipo.');
+    } else {
+      setPinError('No pude conectar con la base. Revisá la conexión.');
+    }
+  };
+
+  // Si cancela, revertimos ese grupo a lo que hay en la nube: no queremos
+  // que la pantalla muestre un cambio que nunca se guardo.
+  const handlePinCancel = async () => {
+    const grupo = pinPromptGroup;
+    setPinPromptGroup(null);
+    setPinError(null);
+    if (!grupo) return;
+    const remotos = await fetchGroups();
+    const original = remotos?.find(g => g.id === grupo.id);
+    if (original) {
+      lastPushed.current.set(original.id, JSON.stringify(original));
+      setGroups(prev => prev.map(g => (g.id === original.id ? original : g)));
+      showToast(`Grupo #${grupo.groupNumber} sin cambios: hace falta el PIN del equipo.`);
+    }
+  };
+
+  useEffect(() => {
+    if (!isCloudEnabled || !hydrated.current) return;
+    const t = setTimeout(() => { pushConfig(config); }, 400);
+    return () => clearTimeout(t);
+  }, [config]);
+
+  // --- Cambios que llegan de otros dispositivos ---
+  useEffect(() => {
+    if (!isCloudEnabled) return;
+    return subscribeToGroups(remoto => {
+      const serializado = JSON.stringify(remoto);
+      // Si es el eco de algo que subimos nosotros, lo ignoramos.
+      if (lastPushed.current.get(remoto.id) === serializado) return;
+      lastPushed.current.set(remoto.id, serializado);
+      setGroups(prev => {
+        const existe = prev.some(g => g.id === remoto.id);
+        if (!existe) {
+          return [...prev, remoto].sort((a, b) => a.groupNumber - b.groupNumber);
+        }
+        return prev.map(g => (g.id === remoto.id ? remoto : g));
+      });
+    });
+  }, []);
 
   // Keep selected group valid
   useEffect(() => {
@@ -291,7 +446,13 @@ export default function App() {
 
   const handleSaveProducer = (updatedGroup: GroupProject) => {
     handleUpdateGroup(updatedGroup);
-    showToast(`Productora "${updatedGroup.productionCompany || updatedGroup.groupName}" guardada.`);
+    const nombre = updatedGroup.productionCompany || updatedGroup.groupName;
+    if (!updatedGroup.isRegistered) {
+      showToast(`⚠️ "${nombre}" quedó SIN registrar: falta cargar al menos un integrante.`);
+      return;
+    }
+    const n = updatedGroup.membersList?.length || 0;
+    showToast(`"${nombre}" guardada con ${n} integrante${n === 1 ? '' : 's'}.`);
   };
 
   const handleSaveAndLaunchMission = (registeredGroup: GroupProject) => {
@@ -445,6 +606,47 @@ export default function App() {
         isOpen={isDataBankOpen}
         onClose={() => setIsDataBankOpen(false)}
       />
+
+      {/* Pedido de PIN cuando un grupo esta reservado por su equipo */}
+      <PinPromptModal
+        group={pinPromptGroup}
+        isOpen={Boolean(pinPromptGroup)}
+        error={pinError}
+        onClose={handlePinCancel}
+        onSubmit={handlePinSubmit}
+      />
+
+      {/* Indicador de sincronizacion: que se vea de un vistazo si esto se esta guardando */}
+      <div
+        className="fixed bottom-5 left-5 z-40 flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold backdrop-blur"
+        style={{
+          borderColor:
+            cloudStatus === 'sincronizado' ? 'rgba(163,230,53,0.45)'
+            : cloudStatus === 'error' ? 'rgba(248,113,113,0.5)'
+            : 'rgba(148,163,184,0.35)',
+          background: 'rgba(12,14,20,0.85)',
+          color:
+            cloudStatus === 'sincronizado' ? '#bef264'
+            : cloudStatus === 'error' ? '#fca5a5'
+            : '#94a3b8',
+        }}
+        title={
+          cloudStatus === 'sincronizado' ? 'Los grupos se guardan en la nube y se ven desde cualquier dispositivo.'
+          : cloudStatus === 'conectando' ? 'Conectando con la base...'
+          : cloudStatus === 'error' ? 'No hay conexion con la base. Se sigue guardando en este navegador.'
+          : 'Modo local: los datos viven solo en este navegador.'
+        }
+      >
+        {cloudStatus === 'sincronizado' && <Cloud className="w-3.5 h-3.5" />}
+        {cloudStatus === 'conectando' && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+        {(cloudStatus === 'error' || cloudStatus === 'local') && <CloudOff className="w-3.5 h-3.5" />}
+        <span>
+          {cloudStatus === 'sincronizado' && 'Guardado en la nube'}
+          {cloudStatus === 'conectando' && 'Conectando...'}
+          {cloudStatus === 'error' && 'Sin conexion — solo este equipo'}
+          {cloudStatus === 'local' && 'Modo local'}
+        </span>
+      </div>
 
       {/* Floating Toast Notification */}
       {toastMessage && (

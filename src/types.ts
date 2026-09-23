@@ -75,6 +75,11 @@ export interface GroupProject {
   certificateIssuedAt?: string;
   isRegistered?: boolean; // Ha completado la carga de productora e integrantes
   roadmapNotes?: string; // Acuerdos y notas de la hoja de ruta inicial
+  /**
+   * Solo lectura: viene de la columna has_pin en la base, no se guarda en el jsonb.
+   * true = el equipo ya reservó el grupo con un PIN y hace falta para editarlo.
+   */
+  hasPin?: boolean;
   
   // Randomly selected attributes
   genre?: GenreItem;
